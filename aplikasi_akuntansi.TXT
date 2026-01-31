@@ -1,0 +1,341 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import sqlite3
+import csv
+import os
+import webbrowser
+from datetime import datetime
+
+class AkuntansiApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Aplikasi Akuntansi Lengkap - Pro")
+        # PERBAIKAN: Ukuran window sudah diperbaiki dari typo sebelumnya
+        self.root.geometry("1100x750")
+        
+        self.editing_id = None
+        self.file_path_cache = ""
+        
+        # Database
+        self.conn = sqlite3.connect('akuntansi_db.sqlite')
+        self.create_tables()
+        self.check_db_upgrade()
+        
+        self.setup_variables()
+        
+        # UI
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        self.create_tab_jurnal()
+        self.create_tab_master_akun()
+        self.create_tab_master_bantu()
+        self.create_tab_laporan()
+        
+        self.load_combos()
+
+    def setup_variables(self):
+        self.tgl_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        self.bukti_var = tk.StringVar()
+        self.ket_var = tk.StringVar()
+        self.akun_var = tk.StringVar()
+        self.bantu_var = tk.StringVar()
+        self.debet_var = tk.DoubleVar(value=0.0)
+        self.kredit_var = tk.DoubleVar(value=0.0)
+        self.file_label_var = tk.StringVar(value="Tidak ada file")
+
+    def create_tables(self):
+        c = self.conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS akun (
+            kode TEXT PRIMARY KEY, nama TEXT, pos_saldo TEXT, pos_laporan TEXT, saldo_awal REAL DEFAULT 0
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS bantu (
+            kode TEXT PRIMARY KEY, nama TEXT, status TEXT, saldo_awal REAL DEFAULT 0
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS jurnal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tanggal TEXT, bukti TEXT, keterangan TEXT,
+            kode_akun TEXT, kode_bantu TEXT,
+            debet REAL, kredit REAL,
+            file_path TEXT
+        )''')
+        self.conn.commit()
+
+    def check_db_upgrade(self):
+        try:
+            self.conn.execute("SELECT file_path FROM jurnal LIMIT 1")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE jurnal ADD COLUMN file_path TEXT")
+            self.conn.commit()
+
+    def create_tab_jurnal(self):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="Jurnal Umum")
+        
+        input_frame = ttk.LabelFrame(frame, text="Form Input Jurnal", padding=10)
+        input_frame.pack(fill='x', padx=10, pady=5)
+        
+        ttk.Label(input_frame, text="Tanggal (YYYY-MM-DD):").grid(row=0, column=0, sticky='w')
+        ttk.Entry(input_frame, textvariable=self.tgl_var, width=15).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(input_frame, text="No. Bukti:").grid(row=0, column=2, sticky='w')
+        ttk.Entry(input_frame, textvariable=self.bukti_var, width=15).grid(row=0, column=3, padx=5, pady=5)
+        
+        ttk.Label(input_frame, text="Keterangan:").grid(row=1, column=0, sticky='w')
+        ttk.Entry(input_frame, textvariable=self.ket_var, width=50).grid(row=1, column=1, columnspan=3, padx=5, pady=5, sticky='we')
+        
+        ttk.Label(input_frame, text="Akun:").grid(row=2, column=0, sticky='w')
+        self.combo_akun = ttk.Combobox(input_frame, textvariable=self.akun_var, width=35)
+        self.combo_akun.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(input_frame, text="Kode Bantu:").grid(row=2, column=2, sticky='w')
+        self.combo_bantu = ttk.Combobox(input_frame, textvariable=self.bantu_var, width=35)
+        self.combo_bantu.grid(row=2, column=3, padx=5, pady=5)
+        
+        ttk.Label(input_frame, text="Debet:").grid(row=3, column=0, sticky='w')
+        ttk.Entry(input_frame, textvariable=self.debet_var).grid(row=3, column=1, padx=5, pady=5)
+        ttk.Label(input_frame, text="Kredit:").grid(row=3, column=2, sticky='w')
+        ttk.Entry(input_frame, textvariable=self.kredit_var).grid(row=3, column=3, padx=5, pady=5)
+        
+        f_btn = ttk.Frame(input_frame)
+        f_btn.grid(row=4, column=0, columnspan=4, pady=10)
+        self.btn_simpan = ttk.Button(f_btn, text="Simpan Ke Jurnal", command=self.save_jurnal)
+        self.btn_simpan.pack(side='left', padx=5)
+        ttk.Button(f_btn, text="Reset Form", command=self.reset_form).pack(side='left', padx=5)
+        ttk.Button(f_btn, text="Pilih Lampiran File", command=self.browse_file).pack(side='left', padx=5)
+        ttk.Label(f_btn, textvariable=self.file_label_var, foreground="green").pack(side='left')
+
+        ctrl_frame = ttk.Frame(frame)
+        ctrl_frame.pack(fill='x', padx=10)
+        ttk.Button(ctrl_frame, text="Edit Transaksi", command=self.load_for_edit).pack(side='left', padx=2)
+        ttk.Button(ctrl_frame, text="Hapus Transaksi", command=self.delete_jurnal).pack(side='left', padx=2)
+        ttk.Button(ctrl_frame, text="Buka Lampiran", command=self.view_file).pack(side='left', padx=2)
+
+        self.tree_jurnal = ttk.Treeview(frame, columns=('ID', 'Tgl', 'Bukti', 'Ket', 'Akun', 'Bantu', 'Debet', 'Kredit', 'Path'), show='headings')
+        for c in self.tree_jurnal['columns']: self.tree_jurnal.heading(c, text=c); self.tree_jurnal.column(c, width=90)
+        self.tree_jurnal.column('Ket', width=200); self.tree_jurnal.column('Path', width=0, stretch=False)
+        self.tree_jurnal.pack(fill='both', expand=True, padx=10, pady=5)
+        self.refresh_jurnal()
+
+    def create_tab_master_akun(self):
+        frame = ttk.Frame(self.notebook); self.notebook.add(frame, text="Master Akun")
+        pnl = ttk.Frame(frame, padding=10); pnl.pack(fill='x')
+        self.ma_kode, self.ma_nama = tk.StringVar(), tk.StringVar()
+        self.ma_pos, self.ma_lap = tk.StringVar(value='DEBET'), tk.StringVar(value='NERACA')
+        ttk.Label(pnl, text="Kode:").pack(side='left')
+        ttk.Entry(pnl, textvariable=self.ma_kode, width=10).pack(side='left', padx=2)
+        ttk.Label(pnl, text="Nama:").pack(side='left')
+        ttk.Entry(pnl, textvariable=self.ma_nama, width=20).pack(side='left', padx=2)
+        ttk.Button(pnl, text="Tambah", command=self.add_akun).pack(side='left', padx=5)
+        ttk.Button(pnl, text="Import CSV", command=self.import_akun_csv).pack(side='left', padx=5)
+        self.tree_akun = ttk.Treeview(frame, columns=('Kode', 'Nama', 'Pos', 'Lap', 'Saldo'), show='headings')
+        for c in self.tree_akun['columns']: self.tree_akun.heading(c, text=c)
+        self.tree_akun.pack(fill='both', expand=True, padx=10, pady=5)
+        self.refresh_akun()
+
+    def create_tab_master_bantu(self):
+        frame = ttk.Frame(self.notebook); self.notebook.add(frame, text="Master Bantu")
+        pnl = ttk.Frame(frame, padding=10); pnl.pack(fill='x')
+        self.mb_kode, self.mb_nama = tk.StringVar(), tk.StringVar()
+        self.mb_status = tk.StringVar(value='PIUTANG')
+        ttk.Label(pnl, text="Kode:").pack(side='left')
+        ttk.Entry(pnl, textvariable=self.mb_kode, width=10).pack(side='left', padx=2)
+        ttk.Label(pnl, text="Nama:").pack(side='left')
+        ttk.Entry(pnl, textvariable=self.mb_nama, width=20).pack(side='left', padx=2)
+        ttk.Button(pnl, text="Tambah", command=self.add_bantu).pack(side='left', padx=5)
+        ttk.Button(pnl, text="Import CSV", command=self.import_bantu_csv).pack(side='left', padx=5)
+        self.tree_bantu = ttk.Treeview(frame, columns=('Kode', 'Nama', 'Status', 'Saldo'), show='headings')
+        for c in self.tree_bantu['columns']: self.tree_bantu.heading(c, text=c)
+        self.tree_bantu.pack(fill='both', expand=True, padx=10, pady=5)
+        self.refresh_bantu()
+
+    def create_tab_laporan(self):
+        frame = ttk.Frame(self.notebook); self.notebook.add(frame, text="Laporan Keuangan")
+        ctrl = ttk.LabelFrame(frame, text="Menu Laporan", padding=10); ctrl.pack(fill='x', padx=10, pady=5)
+        self.rtype = tk.StringVar(value="Buku Besar")
+        ttk.OptionMenu(ctrl, self.rtype, "Buku Besar", "Buku Besar", "Laba Rugi").pack(side='left', padx=5)
+        ttk.Button(ctrl, text="Tampilkan Laporan", command=self.generate_report).pack(side='left', padx=5)
+        ttk.Button(ctrl, text="Export CSV", command=lambda: self.export_data("csv")).pack(side='left', padx=2)
+        ttk.Button(ctrl, text="Export Excel", command=lambda: self.export_data("excel")).pack(side='left', padx=2)
+        ttk.Button(ctrl, text="Print ke PDF", command=self.print_to_html).pack(side='left', padx=2)
+        
+        self.tree_rep = ttk.Treeview(frame, columns=(1,2,3,4,5,6), show='headings')
+        self.tree_rep.pack(fill='both', expand=True, padx=10, pady=5)
+
+    # --- LOGIKA IMPORT ---
+    def import_bantu_csv(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        if not path: return
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for _ in range(5): next(reader, None) # Loncat header
+                count = 0
+                for r in reader:
+                    if len(r) > 2 and r[1]:
+                        self.conn.execute("INSERT OR REPLACE INTO bantu VALUES (?,?,?,?)", (r[1], r[2], r[4], r[5]))
+                        count += 1
+                self.conn.commit()
+                self.refresh_bantu(); self.load_combos()
+                messagebox.showinfo("Berhasil", f"Import {count} data Kode Bantu selesai.")
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def import_akun_csv(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        if not path: return
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                for _ in range(5): next(reader, None)
+                count = 0
+                for r in reader:
+                    if len(r) > 2 and r[1]:
+                        self.conn.execute("INSERT OR REPLACE INTO akun VALUES (?,?,?,?,?)", (r[1], r[2], r[4], r[5], r[6]))
+                        count += 1
+                self.conn.commit()
+                self.refresh_akun(); self.load_combos()
+                messagebox.showinfo("Berhasil", f"Import {count} data Akun selesai.")
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    # --- LOGIKA JURNAL ---
+    def save_jurnal(self):
+        try:
+            akun = self.akun_var.get().split(" | ")[0]
+            bantu = self.bantu_var.get().split(" | ")[0] if " | " in self.bantu_var.get() else None
+            if not akun: return messagebox.showwarning("Peringatan", "Pilih Akun terlebih dahulu")
+            
+            vals = (self.tgl_var.get(), self.bukti_var.get(), self.ket_var.get(), akun, bantu, self.debet_var.get(), self.kredit_var.get(), self.file_path_cache)
+            if self.editing_id:
+                self.conn.execute("UPDATE jurnal SET tanggal=?, bukti=?, keterangan=?, kode_akun=?, kode_bantu=?, debet=?, kredit=?, file_path=? WHERE id=?", vals + (self.editing_id,))
+            else:
+                self.conn.execute("INSERT INTO jurnal (tanggal, bukti, keterangan, kode_akun, kode_bantu, debet, kredit, file_path) VALUES (?,?,?,?,?,?,?,?)", vals)
+            
+            self.conn.commit(); self.reset_form(); self.refresh_jurnal()
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def load_for_edit(self):
+        sel = self.tree_jurnal.selection()
+        if not sel: return
+        v = self.tree_jurnal.item(sel)['values']
+        self.editing_id = v[0]
+        self.tgl_var.set(v[1]); self.bukti_var.set(v[2]); self.ket_var.set(v[3])
+        self.debet_var.set(float(str(v[6]).replace(',','')))
+        self.kredit_var.set(float(str(v[7]).replace(',','')))
+        self.file_path_cache = v[8] if v[8] != 'None' else ""
+        self.file_label_var.set(os.path.basename(self.file_path_cache) if self.file_path_cache else "Tidak ada file")
+        self.btn_simpan.config(text="Update Transaksi")
+
+    def delete_jurnal(self):
+        sel = self.tree_jurnal.selection()
+        if sel and messagebox.askyesno("Hapus", "Hapus baris ini?"):
+            self.conn.execute("DELETE FROM jurnal WHERE id=?", (self.tree_jurnal.item(sel)['values'][0],))
+            self.conn.commit(); self.refresh_jurnal()
+
+    def view_file(self):
+        sel = self.tree_jurnal.selection()
+        if not sel: return
+        path = self.tree_jurnal.item(sel)['values'][8]
+        if path and os.path.exists(path): webbrowser.open(path)
+        else: messagebox.showwarning("File", "File lampiran tidak ditemukan atau tidak ada.")
+
+    def browse_file(self):
+        f = filedialog.askopenfilename()
+        if f: self.file_path_cache = f; self.file_label_var.set(os.path.basename(f))
+
+    def reset_form(self):
+        self.tgl_var.set(datetime.now().strftime("%Y-%m-%d")); self.bukti_var.set(""); self.ket_var.set("")
+        self.debet_var.set(0.0); self.kredit_var.set(0.0); self.editing_id = None
+        self.file_path_cache = ""; self.file_label_var.set("Tidak ada file")
+        self.btn_simpan.config(text="Simpan Ke Jurnal")
+
+    def refresh_jurnal(self):
+        self.tree_jurnal.delete(*self.tree_jurnal.get_children())
+        for r in self.conn.execute("SELECT * FROM jurnal ORDER BY id DESC"):
+            v = list(r); v[6]=f"{v[6]:,.0f}"; v[7]=f"{v[7]:,.0f}"
+            self.tree_jurnal.insert('', 'end', values=v)
+
+    def refresh_akun(self):
+        self.tree_akun.delete(*self.tree_akun.get_children())
+        for r in self.conn.execute("SELECT * FROM akun"): self.tree_akun.insert('', 'end', values=r)
+
+    def refresh_bantu(self):
+        self.tree_bantu.delete(*self.tree_bantu.get_children())
+        for r in self.conn.execute("SELECT * FROM bantu"): self.tree_bantu.insert('', 'end', values=r)
+
+    def load_combos(self):
+        self.combo_akun['values'] = [f"{r[0]} | {r[1]}" for r in self.conn.execute("SELECT kode, nama FROM akun")]
+        self.combo_bantu['values'] = ["-"] + [f"{r[0]} | {r[1]}" for r in self.conn.execute("SELECT kode, nama FROM bantu")]
+
+    def add_akun(self):
+        try:
+            self.conn.execute("INSERT INTO akun VALUES (?,?,?,?,?)", (self.ma_kode.get(), self.ma_nama.get(), self.ma_pos.get(), self.ma_lap.get(), 0))
+            self.conn.commit(); self.refresh_akun(); self.load_combos()
+        except: pass
+
+    def add_bantu(self):
+        try:
+            self.conn.execute("INSERT INTO bantu VALUES (?,?,?,?)", (self.mb_kode.get(), self.mb_nama.get(), self.mb_status.get(), 0))
+            self.conn.commit(); self.refresh_bantu(); self.load_combos()
+        except: pass
+
+    def generate_report(self):
+        t = self.rtype.get(); self.tree_rep.delete(*self.tree_rep.get_children())
+        c = self.conn.cursor()
+        if t == "Buku Besar":
+            self.tree_rep['columns'] = ('Tgl', 'Bukti', 'Keterangan', 'Akun', 'Debet', 'Kredit')
+            for col in self.tree_rep['columns']: self.tree_rep.heading(col, text=col); self.tree_rep.column(col, width=150)
+            res = c.execute("""SELECT j.tanggal, j.bukti, j.keterangan, a.nama, j.debet, j.kredit FROM jurnal j JOIN akun a ON j.kode_akun=a.kode""").fetchall()
+            for r in res: self.tree_rep.insert('', 'end', values=r)
+        elif t == "Laba Rugi":
+            self.tree_rep['columns'] = ('Kode', 'Nama Akun', 'Debet', 'Kredit', 'Saldo Akhir')
+            for col in self.tree_rep['columns']: self.tree_rep.heading(col, text=col)
+            # Mengambil akun dengan Pos Laporan LABA RUGI
+            res = c.execute("""SELECT a.kode, a.nama, SUM(j.debet), SUM(j.kredit) FROM akun a LEFT JOIN jurnal j ON a.kode=j.kode_akun WHERE a.pos_laporan='LABA RUGI' GROUP BY a.kode""").fetchall()
+            for r in res:
+                d, k = (r[2] or 0), (r[3] or 0)
+                saldo = k - d # Pendapatan biasanya di kredit
+                self.tree_rep.insert('', 'end', values=(r[0], r[1], f"{d:,.0f}", f"{k:,.0f}", f"{saldo:,.0f}"))
+        elif t == "Neraca":
+            self.tree_rep['columns'] = ('Kode', 'Nama Akun', 'Debet', 'Kredit', 'Saldo Neraca')
+            for col in self.tree_rep['columns']: self.tree_rep.heading(col, text=col)
+            # Mengambil akun dengan Pos Laporan NERACA
+            res = c.execute("""SELECT a.kode, a.nama, SUM(j.debet), SUM(j.kredit) FROM akun a LEFT JOIN jurnal j ON a.kode=j.kode_akun WHERE a.pos_laporan='NERACA' GROUP BY a.kode""").fetchall()
+            for r in res:
+                d, k = (r[2] or 0), (r[3] or 0)
+                saldo = d - k # Aktiva biasanya di debet
+                self.tree_rep.insert('', 'end', values=(r[0], r[1], f"{d:,.0f}", f"{k:,.0f}", f"{saldo:,.0f}"))
+        elif t == "Neraca Lajur":
+            self.tree_rep['columns'] = ('Kode', 'Nama Akun', 'NS_D', 'NS_K', 'LR_D', 'LR_K', 'N_D', 'N_K')
+            for col in self.tree_rep['columns']: self.tree_rep.heading(col, text=col); self.tree_rep.column(col, width=100)
+            res = c.execute("""SELECT a.kode, a.nama, a.pos_laporan, SUM(j.debet), SUM(j.kredit) FROM akun a LEFT JOIN jurnal j ON a.kode=j.kode_akun GROUP BY a.kode""").fetchall()
+            for r in res:
+                kode, nama, lap, d, k = r[0], r[1], r[2], (r[3] or 0), (r[4] or 0)
+                lr_d, lr_k, n_d, n_k = 0, 0, 0, 0
+                if lap == 'LABA RUGI':
+                    lr_d, lr_k = d, k
+                else: n_d, n_k = d, k
+                self.tree_rep.insert('', 'end', values=(kode, nama, f"{d:,.0f}", f"{k:,.0f}", f"{lr_d:,.0f}", f"{lr_k:,.0f}", f"{n_d:,.0f}", f"{n_k:,.0f}"))
+    def export_data(self, mode):
+        fname = filedialog.asksaveasfilename(defaultextension=".csv" if mode=="csv" else ".xls")
+        if not fname: return
+        try:
+            with open(fname, 'w', newline='') as f:
+                w = csv.writer(f, delimiter=',' if mode=='csv' else '\t')
+                w.writerow([self.tree_rep.heading(c)['text'] for c in self.tree_rep['columns']])
+                for row in self.tree_rep.get_children(): w.writerow(self.tree_rep.item(row)['values'])
+            messagebox.showinfo("Export", f"File berhasil disimpan ke {fname}")
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def print_to_html(self):
+        html = f"<html><body><h2>Laporan {self.rtype.get()}</h2><table border='1' cellspacing='0' cellpadding='5'>"
+        html += "<tr>" + "".join([f"<th>{self.tree_rep.heading(c)['text']}</th>" for c in self.tree_rep['columns']]) + "</tr>"
+        for row in self.tree_rep.get_children():
+            html += "<tr>" + "".join([f"<td>{v}</td>" for v in self.tree_rep.item(row)['values']]) + "</tr>"
+        html += "</table><p>Dicetak pada: {datetime.now()}</p></body></html>"
+        with open("laporan_cetak.html", "w") as f: f.write(html)
+        webbrowser.open("laporan_cetak.html")
+        messagebox.showinfo("Print", "Laporan dibuka di Browser. Tekan Ctrl+P untuk cetak ke PDF.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AkuntansiApp(root)
+    root.mainloop()
